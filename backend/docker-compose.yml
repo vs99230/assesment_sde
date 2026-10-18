@@ -1,0 +1,61 @@
+# One command:  docker compose up --build
+#   API      -> http://localhost:8000   (docs at /docs)
+#   Frontend -> set VITE_USE_MOCK=false and VITE_API_BASE_URL=http://localhost:8000
+#
+# Services: db (PostgreSQL), api (migrates + seeds on start), worker (outbox delivery)
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+psycopg://ops:ops@db:5432/ops
+  JWT_SECRET: ${JWT_SECRET:-change-me-please-use-a-long-random-string-0123456789}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+  SEED_ITEMS: ${SEED_ITEMS:-5000}
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ops
+      POSTGRES_PASSWORD: ops
+      POSTGRES_DB: ops
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./scripts/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ops -d ops"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build: .
+    environment: *app-env
+    depends_on:
+      db:
+        condition: service_healthy
+    # Migrate, seed demo data only if the database is empty, then serve.
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m app.seed --if-empty &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  worker:
+    build: .
+    environment: *app-env
+    depends_on:
+      api:
+        condition: service_healthy # tables exist once the API is healthy
+    command: python -m app.worker
+    restart: unless-stopped
+
+volumes:
+  pgdata:
